@@ -7,3 +7,5 @@ psycopg[binary]
 pgvector
 numpy
 pytest
+pypdf
+docx
