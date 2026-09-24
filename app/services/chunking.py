@@ -6,6 +6,8 @@ from docx import Document
 import os
 import re
 
+
+#reading the different docs based on the format
 def read_pdf(document): 
     reader = PdfReader(document)
     return "\n".join((p.extract_text() or "") for p in reader.pages)
@@ -29,6 +31,8 @@ FORMAT_HANDLER = {
     ".md": read_md
 }
 
+
+#splitting the text and storing it in list for chunking 
 def split_of_sentences(text: str) -> list[str]: 
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     return [s.strip() for s in sentences if s]
@@ -69,6 +73,7 @@ def chunk_text(text, chunk_size = 800, overlap = 100) -> list[str]:
     return chunks
 
 
+#main folder for chunking 
 def ingest_folder(root, chunk_size = 800, overlap = 100):
     all_chunks = []
 
