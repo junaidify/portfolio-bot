@@ -1,5 +1,5 @@
 from docx import paragraph
-from .. import data
+from ... import data
 from pathlib import Path
 from pypdf import PdfReader
 from docx import Document
@@ -41,7 +41,7 @@ def split_of_sentences(text: str) -> list[str]:
 
 
 def chunk_text(text, chunk_size = 800, overlap = 100) -> list[str]: 
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    paragraph = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks = []
     current = ""
 
