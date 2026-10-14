@@ -9,3 +9,7 @@ numpy
 pytest
 pypdf
 docx
+pydantic
+psycopg2
+tenacity
+openai
