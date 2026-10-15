@@ -1,8 +1,8 @@
-from psycopg2.errors import RaiseException
-from fastapi import APIRouter, HTTPException
-import time 
 import logging
+import time
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
 from ...services.retrieval import ask
 
 
@@ -10,27 +10,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class QueryRequest(BaseModel): 
+class QueryRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=500)
-    top_k: int = Field(5, ge=1, le=10)
+    top_k: int = Field(default=5, ge=1, le=10)
 
-class QueryResponse(BaseModel): 
+
+class QueryResponse(BaseModel):
     answer: str
 
 
 @router.post("/query", response_model=QueryResponse)
-def query(req: QueryRequest): 
+def query(req: QueryRequest):
     start = time.perf_counter()
 
-    try: 
+    try:
         answer = ask(req.question, req.top_k)
-    except Exception: 
+
+        elapsed = time.perf_counter() - start
+        logger.info("RAG query completed in %.2fs", elapsed)
+
+        return QueryResponse(answer=answer)
+
+    except Exception as exc:
         logger.exception("RAG query failed")
-        raise HTTPException("question=%r  top_k=%d  took=%.2fs", req.question, req.top_k, time.perf_counter() -> start)
 
-    return QueryResponse(answer=answer)
-
-
-
-
-
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process the question.",
+        ) from exc

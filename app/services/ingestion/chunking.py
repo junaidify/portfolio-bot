@@ -1,5 +1,3 @@
-from docx import paragraph
-from ... import data
 from pathlib import Path
 from pypdf import PdfReader
 from docx import Document
@@ -74,42 +72,45 @@ def chunk_text(text, chunk_size = 800, overlap = 100) -> list[str]:
 
 
 #main folder for chunking 
-def ingest_folder(root, chunk_size = 800, overlap = 100):
+def ingest_file(file_path, chunk_size = 800, overlap = 100):
+    path = Path(file_path).resolve()
+
+    reader = FORMAT_HANDLER.get(path.suffix.lower())
+
+    if reader is None: 
+        print(f"Skipping unsupported file: {path.name}")
+        return []
+
+    try: 
+        text = reader(str(path))
+    except Exception as e: 
+        print(f"Failed to read file {path.name}: {e}")
+        return []
+
+
+    if not text.strip(): 
+        print(f"Not extractable text in:{path.name}")
+        return []
+
+    chunks = chunk_text(text, chunk_size, overlap)
+
+    return [{
+        "source": str(path),
+        "index": i,
+        "text": text
+    } for i, text in enumerate(chunks)]
+
+
+
+def ingest_folder(folder_path, chunk_size = 800, overlap = 100):
+    path = Path(folder_path).resolve()
     all_chunks = []
 
-    for dirpath, _, files in os.walk(root):
-        for f in files: 
-            full_path = os.path.join(dirpath, f)
-            extension = Path(f).suffix.lower()
-
-            reader = FORMAT_HANDLER.get(extension)
-
-            if reader is None: 
-                print(f"Skipping unsupported file: {f}")
-                continue
-
-            try: 
-                text = reader(full_path)
-            except Exception as e: 
-                print(f"Failed to read file {f}: {e}")
-                continue
-
-            if not text.strip(): 
-                print(f"Not extractable text in:{f}")
-                continue
-
-            chunks = chunk_text(text, chunk_size, overlap)
-
-            for i, chunk in enumerate(chunks):
-                all_chunks.append({
-                    "source": full_path, 
-                    "index": i, 
-                    "text": chunk
-                }) 
+    for file in path.glob("**/*"):
+        if file.is_file():
+            chunks = ingest_file(str(file), chunk_size, overlap)
+            all_chunks.extend(chunks)
 
     return all_chunks
-
-
-
 
 
