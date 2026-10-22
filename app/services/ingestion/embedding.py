@@ -1,42 +1,50 @@
-import os
+"""
+Ingestion — embedding + pgvector storage layer.
+
+Embeds document chunks via NVIDIA NIM and stores them in a
+``document_chunks`` table with a pgvector column.
+"""
+
+import logging
 import time
+
 import psycopg2
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
 from pgvector.psycopg2 import register_vector
-from app.services.ingestion.chunking import ingest_folder, ingest_file
-from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-load_dotenv()
+from app.config import settings
+from app.services.ingestion.chunking import ingest_file
 
-EMBED_MODEL = os.environ["NVIDIA_EMBED_MODEL"]
-EMBED_DIM = os.environ["NVIDIA_EMBED_DIM"]
+logger = logging.getLogger(__name__)
+
+# ── NVIDIA embedding client (OpenAI-compatible) ──────────────────
 
 client = OpenAI(
-    base_url=os.environ["NVIDIA_BASE_URL"],
-    api_key=os.environ["NVIDIA_API_KEY"],
+    base_url=settings.nvidia_base_url,
+    api_key=settings.nvidia_api_key,
 )
 
+EMBED_MODEL = settings.nvidia_embed_model
+EMBED_DIM = settings.nvidia_embed_dim
+
+
+# ── Database helpers ──────────────────────────────────────────────
 
 def get_connection_db():
+    """Return a fresh psycopg2 connection (without registering the vector type)."""
     connection = psycopg2.connect(
-        dbname=os.getenv("PGDATABASE", "postgres"),
-        user=os.getenv("PGUSER", "postgres"),
-        password=os.getenv("PGPASSWORD", ""),
-        host=os.getenv("PGHOST", "localhost"),
-        port=os.getenv("PGPORT", "5432"),
+        dbname=settings.pgdatabase,
+        user=settings.pguser,
+        password=settings.pgpassword,
+        host=settings.pghost,
+        port=settings.pgport,
     )
-
-    register_vector(connection)
     return connection
 
 
-
-# retrieve.py imports this name
-get_connection = get_connection_db
-
-
 def setup_table(db_connection):
+    """Create the vector extension and ``document_chunks`` table if needed."""
     with db_connection.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         cur.execute(f"""
@@ -49,14 +57,20 @@ def setup_table(db_connection):
             )
         """)
     db_connection.commit()
+    # Now that the extension exists, register the type on this connection
+    register_vector(db_connection)
 
+
+# ── Embedding ─────────────────────────────────────────────────────
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
-def embed_batch(texts, input_type="passage"):
+def embed_batch(texts: list[str], input_type: str = "passage") -> list[list[float]]:
     """
-    Embeds a batch of texts in one API call.
-    input_type must be "passage" when indexing documents, "query" when embedding
-    a search question. Retries up to 3 times on failures like rate limits.
+    Embed a batch of texts in one API call.
+
+    *input_type* must be ``"passage"`` when indexing documents and
+    ``"query"`` when embedding a search question.
+    Retries up to 3× on transient failures (rate-limits, timeouts).
     """
     response = client.embeddings.create(
         model=EMBED_MODEL,
@@ -67,13 +81,19 @@ def embed_batch(texts, input_type="passage"):
     return [item.embedding for item in response.data]
 
 
+# ── Chunk CRUD ────────────────────────────────────────────────────
+
 def delete_existing(db_connection, sources):
-    # Re-ingesting a file replaces its old chunks instead of duplicating them
+    """Remove old rows so re-ingesting a file replaces, not duplicates."""
     with db_connection.cursor() as cur:
-        cur.execute("DELETE FROM document_chunks WHERE source = ANY(%s)", (list(sources),))
+        cur.execute(
+            "DELETE FROM document_chunks WHERE source = ANY(%s)",
+            (list(sources),),
+        )
 
 
 def insert_chunks(db_connection, chunks, embeddings):
+    """Insert chunk rows with their embedding vectors."""
     with db_connection.cursor() as cur:
         for chunk, vector in zip(chunks, embeddings):
             cur.execute(
@@ -85,34 +105,44 @@ def insert_chunks(db_connection, chunks, embeddings):
             )
 
 
-def run_file(file_path, batch_size: int = 16, sleep_seconds: float = 1.5):
+# ── Public: ingest a single file end-to-end ──────────────────────
+
+def run_file(file_path):
+    """Chunk → embed → store a single file in pgvector."""
+    batch_size = settings.nvidia_embed_batch_size
+    sleep_seconds = settings.nvidia_embed_sleep_seconds
+
     chunks = ingest_file(file_path)
-    print(f"Ingested {len(chunks)} chunks from {file_path}")
+    logger.info("Chunked %s → %d chunks", file_path, len(chunks))
 
     if not chunks:
-        print(f"No chunks to ingest: {file_path}")
+        logger.warning("No chunks to ingest: %s", file_path)
         return
 
     db_connection = get_connection_db()
 
     try:
         setup_table(db_connection)
-        # One transaction: delete old rows + insert new ones, committed together.
-        # If anything fails midway, rollback leaves the old data untouched.
 
         source = chunks[0]["source"]
         delete_existing(db_connection, {source})
 
         for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-
-            vectors = embed_batch([chunk["text"] for chunk in batch], input_type="passage")
+            batch = chunks[i : i + batch_size]
+            vectors = embed_batch(
+                [c["text"] for c in batch], input_type="passage",
+            )
             insert_chunks(db_connection, batch, vectors)
 
-            print(f"Embedded {i + len(batch)}/{len(chunks)}")
+            logger.info(
+                "Embedded %d/%d chunks for %s",
+                i + len(batch), len(chunks), file_path,
+            )
             time.sleep(sleep_seconds)
 
         db_connection.commit()
+        logger.info("✓ Ingested %s (%d chunks)", file_path, len(chunks))
+
     except Exception:
         db_connection.rollback()
         raise

@@ -1,3 +1,11 @@
+"""
+File-system watcher — auto-ingests documents dropped into ``my_data/``.
+
+On startup it processes every file already present, then watches for
+new / modified / moved files and re-ingests them in real time.
+"""
+
+import logging
 import time
 from pathlib import Path
 
@@ -7,11 +15,13 @@ from watchdog.observers import Observer
 from app.services.ingestion.embedding import run_file
 from app.services.ingestion.chunking import FORMAT_HANDLER
 
-
+logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "my_data"
 
 
-def wait_until_ready(path, attempts=10):
+# ── Helpers ───────────────────────────────────────────────────────
+
+def wait_until_ready(path: Path, attempts: int = 10) -> bool:
     """Wait until a copied file stops changing in size."""
     previous_size = -1
     stable_checks = 0
@@ -37,6 +47,7 @@ def wait_until_ready(path, attempts=10):
 
 
 def process_file(file_path):
+    """Validate and ingest a single file."""
     path = Path(file_path)
 
     if path.suffix.lower() not in FORMAT_HANDLER:
@@ -46,14 +57,16 @@ def process_file(file_path):
         return
 
     if not wait_until_ready(path):
-        print(f"File is not ready; skipping: {path.name}")
+        logger.warning("File not ready; skipping: %s", path.name)
         return
 
     try:
         run_file(path)
     except Exception as e:
-        print(f"Ingestion failed for {path.name}: {e}")
+        logger.exception("Ingestion failed for %s: %s", path.name, e)
 
+
+# ── Watchdog handler ─────────────────────────────────────────────
 
 class DocumentHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -69,20 +82,40 @@ class DocumentHandler(FileSystemEventHandler):
             process_file(event.dest_path)
 
 
-def main():
+# ── Entry points ─────────────────────────────────────────────────
+
+def start_watcher() -> Observer:
+    """
+    Ingest existing files, start the watchdog observer, and return it.
+
+    Called from ``main.py``'s lifespan — runs in a daemon thread so it
+    doesn't block the event loop.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Ingest documents already present at startup.
+    # Ingest documents already present at startup
     for path in DATA_DIR.rglob("*"):
         if path.is_file():
             process_file(path)
 
     observer = Observer()
-    observer.schedule(
-        DocumentHandler(),
-        str(DATA_DIR),
-        recursive=True,
-    )
+    observer.schedule(DocumentHandler(), str(DATA_DIR), recursive=True)
+    observer.start()
+
+    logger.info("👁  Watching for documents in: %s", DATA_DIR)
+    return observer
+
+
+def main():
+    """Standalone entry-point (``python -m app.watcher``)."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    for path in DATA_DIR.rglob("*"):
+        if path.is_file():
+            process_file(path)
+
+    observer = Observer()
+    observer.schedule(DocumentHandler(), str(DATA_DIR), recursive=True)
     observer.start()
 
     print(f"Watching for documents in: {DATA_DIR}")
